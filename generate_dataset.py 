@@ -1,0 +1,183 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  generate_dataset.py                                                         ║
+║  Generates a realistic, OWID-style COVID-19 CSV dataset for the app.         ║
+║  Run once: python generate_dataset.py                                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Produces:  data/covid19_global_data.csv
+Rows:      ~54,000  (20 countries × ~4 years of daily records)
+Columns:   date, country, iso_code, continent, population,
+           total_cases, new_cases, total_deaths, new_deaths,
+           total_recovered, active_cases, total_vaccinations,
+           people_vaccinated, people_fully_vaccinated
+"""
+
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+# ─── Reproducibility ──────────────────────────────────────────────────────────
+np.random.seed(42)
+
+# ─── Country Master Data ──────────────────────────────────────────────────────
+COUNTRIES = [
+    # (name, iso, continent, population, wave_intensity, vax_speed)
+    ("United States",    "USA", "North America",    331_000_000, 1.0,  0.70),
+    ("India",            "IND", "Asia",           1_380_000_000, 0.85, 0.55),
+    ("Brazil",           "BRA", "South America",   214_000_000, 0.95, 0.65),
+    ("France",           "FRA", "Europe",           68_000_000, 0.80, 0.75),
+    ("Germany",          "DEU", "Europe",           84_000_000, 0.75, 0.78),
+    ("United Kingdom",   "GBR", "Europe",           68_000_000, 0.85, 0.80),
+    ("Italy",            "ITA", "Europe",           60_000_000, 0.78, 0.76),
+    ("Spain",            "ESP", "Europe",           47_000_000, 0.82, 0.77),
+    ("Russia",           "RUS", "Europe",          145_000_000, 0.70, 0.45),
+    ("South Africa",     "ZAF", "Africa",           60_000_000, 0.65, 0.30),
+    ("Mexico",           "MEX", "North America",   130_000_000, 0.80, 0.42),
+    ("Argentina",        "ARG", "South America",    45_000_000, 0.75, 0.68),
+    ("Japan",            "JPN", "Asia",            126_000_000, 0.45, 0.80),
+    ("South Korea",      "KOR", "Asia",             52_000_000, 0.50, 0.82),
+    ("Australia",        "AUS", "Oceania",          26_000_000, 0.40, 0.85),
+    ("Canada",           "CAN", "North America",    38_000_000, 0.65, 0.82),
+    ("Turkey",           "TUR", "Europe",           85_000_000, 0.72, 0.55),
+    ("Indonesia",        "IDN", "Asia",            274_000_000, 0.60, 0.45),
+    ("Nigeria",          "NGA", "Africa",          218_000_000, 0.30, 0.15),
+    ("Egypt",            "EGY", "Africa",          102_000_000, 0.42, 0.28),
+]
+
+# ─── Simulation Parameters ────────────────────────────────────────────────────
+START_DATE = "2020-01-01"
+END_DATE   = "2023-12-31"
+dates      = pd.date_range(START_DATE, END_DATE, freq="D")
+N_DAYS     = len(dates)
+
+# Wave definitions: (peak_day_offset, duration_days, relative_height)
+GLOBAL_WAVES = [
+    (60,  120, 1.0),   # Wave 1: Mar–Jun 2020
+    (240, 150, 1.8),   # Wave 2: Sep 2020–Feb 2021
+    (450, 100, 2.5),   # Wave 3: Delta — May–Aug 2021
+    (620, 130, 3.5),   # Wave 4: Omicron — Nov 2021–Mar 2022
+    (780,  90, 1.2),   # Wave 5: BA.2/BA.5 — 2022
+    (950,  80, 0.8),   # Wave 6: late 2022 / early 2023
+]
+
+def gaussian_wave(t, peak, width, height):
+    """Return a Gaussian-shaped epidemic wave."""
+    return height * np.exp(-((t - peak) ** 2) / (2 * width ** 2))
+
+def simulate_country(name, iso, continent, pop, intensity, vax_speed):
+    """
+    Simulate daily COVID-19 statistics for one country over the full period.
+    Returns a DataFrame with one row per day.
+    """
+    t = np.arange(N_DAYS)
+
+    # ── Build composite wave signal ──
+    wave_signal = np.zeros(N_DAYS)
+    for peak, dur, height in GLOBAL_WAVES:
+        # Add country-level jitter to peak timing (±14 days)
+        country_peak = peak + np.random.randint(-14, 14)
+        wave_signal += gaussian_wave(t, country_peak, dur / 3, height)
+
+    # Scale by country intensity and base infection rate
+    base_rate   = 0.0015 * intensity          # ~0.15 % of pop at peak of wave 1
+    raw_cases   = wave_signal * base_rate * pop
+    raw_cases   = np.clip(raw_cases, 0, None)
+
+    # Add stochastic noise
+    noise       = np.random.lognormal(0, 0.15, N_DAYS)
+    new_cases   = np.round(raw_cases * noise).astype(int)
+
+    # Smooth (7-day rolling average then re-scale)
+    new_cases_s = pd.Series(new_cases).rolling(7, min_periods=1).mean().round().astype(int).values
+    new_cases_s = np.clip(new_cases_s, 0, None)
+
+    # ── Deaths (lag 14 days, CFR 1–3 % declining over time) ──
+    cfr = np.linspace(0.025, 0.008, N_DAYS)   # CFR improves with treatment
+    death_signal = np.zeros(N_DAYS)
+    for i in range(N_DAYS):
+        lag = min(i, 14)
+        death_signal[i] = new_cases_s[i - lag] * cfr[i] if i >= lag else 0
+    new_deaths = np.round(death_signal * np.random.lognormal(0, 0.2, N_DAYS)).astype(int)
+    new_deaths = np.clip(new_deaths, 0, None)
+
+    # ── Cumulative totals ──
+    total_cases  = np.cumsum(new_cases_s)
+    total_deaths = np.cumsum(new_deaths)
+
+    # ── Recoveries (lag 21 days, ~97% of closed cases recover) ──
+    recovered_daily = np.zeros(N_DAYS)
+    for i in range(N_DAYS):
+        lag = min(i, 21)
+        recovered_daily[i] = new_cases_s[i - lag] * (1 - cfr[i]) if i >= lag else 0
+    total_recovered = np.round(np.cumsum(recovered_daily)).astype(int)
+    total_recovered = np.minimum(total_recovered, total_cases)
+
+    active_cases = np.clip(total_cases - total_deaths - total_recovered, 0, None)
+
+    # ── Vaccination rollout (starts ~day 360, i.e. Jan 2021) ──
+    vax_start = 360
+    vax_ramp  = np.zeros(N_DAYS)
+    if N_DAYS > vax_start:
+        days_since_vax = np.arange(N_DAYS - vax_start)
+        # Logistic growth to a plateau
+        plateau     = min(vax_speed, 0.92) * pop
+        growth_rate = 0.012
+        mid_point   = 200
+        vax_ramp[vax_start:] = plateau / (1 + np.exp(-growth_rate * (days_since_vax - mid_point)))
+
+    people_fully_vaccinated = np.round(vax_ramp).astype(int)
+    people_vaccinated       = np.round(people_fully_vaccinated * 1.15).astype(int)   # ≥ 1 dose
+    people_vaccinated       = np.minimum(people_vaccinated, int(pop * 0.98))
+    total_vaccinations      = np.round(people_vaccinated * 1.6).astype(int)          # dose count
+
+    df_c = pd.DataFrame({
+        "date":                    dates,
+        "country":                 name,
+        "iso_code":                iso,
+        "continent":               continent,
+        "population":              int(pop),
+        "new_cases":               new_cases_s,
+        "total_cases":             total_cases,
+        "new_deaths":              new_deaths,
+        "total_deaths":            total_deaths,
+        "total_recovered":         total_recovered,
+        "active_cases":            active_cases,
+        "total_vaccinations":      total_vaccinations,
+        "people_vaccinated":       people_vaccinated,
+        "people_fully_vaccinated": people_fully_vaccinated,
+    })
+
+    return df_c
+
+
+def generate():
+    """Generate the full dataset and save to CSV."""
+    print("⏳  Generating COVID-19 dataset …")
+    frames = []
+    for row in COUNTRIES:
+        name, iso, continent, pop, intensity, vax_speed = row
+        print(f"   Simulating {name} …")
+        frames.append(simulate_country(name, iso, continent, pop, intensity, vax_speed))
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # ── Data quality: inject a small number of nulls (realistic missingness) ──
+    null_rate   = 0.005
+    null_cols   = ["new_cases", "new_deaths", "total_vaccinations", "people_vaccinated"]
+    for col in null_cols:
+        mask = np.random.random(len(df)) < null_rate
+        df.loc[mask, col] = np.nan
+
+    # ── Save ──
+    out_path = Path(__file__).parent / "data" / "covid19_global_data.csv"
+    out_path.parent.mkdir(exist_ok=True)
+    df.to_csv(out_path, index=False)
+    print(f"✅  Saved {len(df):,} rows → {out_path}")
+    print(f"   Columns : {list(df.columns)}")
+    print(f"   Date range : {df['date'].min().date()} to {df['date'].max().date()}")
+    print(f"   Countries : {df['country'].nunique()}")
+
+
+if __name__ == "__main__":
+    generate()
