@@ -155,8 +155,7 @@ Animated charts (bar race, scatter race) use Plotly's `animation_frame` paramete
 │   ├── visual_storytelling.py
 │   ├── key_findings.py
 │   └── recommendations.py
-└── data/
-    └── covid19_global_data.csv   ← generated locally; optionally commit to repo
+covid19_global_data.csv   ← generated locally; optionally commit to repo
 ```
 
 > **Note:** The `data/` folder can be added to `.gitignore` if you prefer users to generate the dataset locally. Or commit the CSV for a zero-setup experience.
