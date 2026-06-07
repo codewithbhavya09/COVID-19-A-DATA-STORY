@@ -1,0 +1,308 @@
+================================================================================
+  HOW COVID-19 CHANGED THE WORLD: A DATA STORY
+  Technical & Project Documentation
+  document.txt
+================================================================================
+
+OVERVIEW
+--------
+This document provides full technical documentation for the COVID-19 Data Story
+Streamlit application. It covers architecture decisions, data pipeline design,
+visualisation choices, and deployment instructions.
+
+
+PROJECT GOALS
+-------------
+1. Tell a compelling data story — not a dashboard — about the COVID-19 pandemic.
+2. Guide users through a structured narrative with 7 chapters.
+3. Use interactive, animated visualisations to make patterns visceral and clear.
+4. Provide actionable insights and policy recommendations grounded in data.
+5. Demonstrate good software engineering: modular code, caching, clean separation.
+
+
+ARCHITECTURE
+------------
+The application follows a "chapter router" pattern:
+
+  app.py
+    ├── Loads & caches shared DataFrame (pandas)
+    ├── Applies global CSS theming
+    ├── Renders sidebar navigation (st.radio)
+    └── Routes to chapter module via CHAPTER_MAP dict
+
+  pages/
+    ├── Each chapter is a Python module with a single render(df) function.
+    ├── All chapters receive the same cached DataFrame from app.py.
+    └── Chapters are fully independent — no shared mutable state.
+
+This design means:
+  - Chapters can be developed and tested independently.
+  - Adding a new chapter requires only adding a .py file and one dict entry.
+  - No Streamlit multi-page file naming conventions needed.
+
+
+FILE DESCRIPTIONS
+-----------------
+
+app.py
+  Main entry point. Responsibilities:
+  - st.set_page_config (title, icon, layout)
+  - Global CSS injection (dark editorial theme, fonts, component styles)
+  - @st.cache_data data loading and derived column computation
+  - Session state initialisation
+  - Sidebar navigation rendering
+  - Chapter routing (imports + CHAPTER_MAP dispatch)
+
+generate_dataset.py
+  Standalone script. Run once before launching the app.
+  Responsibilities:
+  - Define 20 countries with epidemiological parameters
+  - Simulate 6 Gaussian epidemic waves with country-specific jitter
+  - Compute deaths with 14-day lag and time-declining CFR
+  - Compute recoveries with 21-day lag
+  - Simulate logistic vaccination rollout (starts Jan 2021)
+  - Inject realistic sparse null values (~0.5% per numeric column)
+  - Save to data/covid19_global_data.csv
+
+pages/introduction.py     Chapter 1 — Scene setting
+pages/exploration.py      Chapter 2 — Data quality and distributions
+pages/global_impact.py    Chapter 3 — Global cases, deaths, waves
+pages/country_comparison.py Chapter 4 — Country rankings and vaccination
+pages/visual_storytelling.py Chapter 5 — Animated and interactive visuals
+pages/key_findings.py     Chapter 6 — Statistical insights
+pages/recommendations.py  Chapter 7 — Policy recommendations and conclusion
+
+requirements.txt
+  Python dependencies:
+    streamlit>=1.32.0
+    pandas>=2.0.0
+    numpy>=1.26.0
+    plotly>=5.20.0
+    scipy>=1.12.0
+
+
+DATA PIPELINE
+-------------
+1. generate_dataset.py creates data/covid19_global_data.csv (run once)
+2. app.py loads CSV with pd.read_csv(..., parse_dates=["date"])
+3. Derived columns computed once at load time:
+     mortality_rate       = total_deaths / total_cases * 100
+     recovery_rate        = total_recovered / total_cases * 100
+     cases_per_million    = total_cases / population * 1_000_000
+     deaths_per_million   = total_deaths / population * 1_000_000
+     vaccination_rate_pct = people_fully_vaccinated / population * 100
+4. DataFrame cached with @st.cache_data — recomputed only on restart
+5. Each chapter module receives the cached df and performs its own aggregations
+
+
+SIMULATION METHODOLOGY
+-----------------------
+The dataset is modelled — not real data — but designed to mirror actual pandemic dynamics.
+
+EPIDEMIC WAVES (6 waves):
+  Wave 1: Day 60,  peak: Mar–Jun 2020, height multiplier: 1.0  (original strain)
+  Wave 2: Day 240, peak: Sep 2020,     height multiplier: 1.8  (Alpha variant era)
+  Wave 3: Day 450, peak: May 2021,     height multiplier: 2.5  (Delta variant)
+  Wave 4: Day 620, peak: Nov 2021,     height multiplier: 3.5  (Omicron)
+  Wave 5: Day 780, peak: mid-2022,     height multiplier: 1.2  (BA.2/BA.5)
+  Wave 6: Day 950, peak: late-2022,    height multiplier: 0.8  (endemic transition)
+
+  Each wave is a Gaussian function: height * exp(-(t - peak)^2 / (2 * width^2))
+  Country timing jitter: ±14 days (random offset per country per wave)
+  Stochastic noise: lognormal(0, 0.15) multiplied onto daily case counts
+
+CASE FATALITY RATE (CFR):
+  Starts at 2.5%, declines linearly to 0.8% by end of period.
+  Rationale: improved treatments (steroids, antivirals), immunity, vaccination.
+  Death lag: 14 days behind new cases.
+  Lognormal noise applied to daily deaths: lognormal(0, 0.2)
+
+RECOVERIES:
+  21-day lag behind new cases.
+  Recovery fraction = 1 - CFR (at the time of case resolution)
+
+VACCINATION:
+  Rollout begins day 360 (approximately January 2021).
+  Logistic growth curve: plateau = vax_speed * population, growth_rate = 0.012
+  Plateau = country-specific vaccination ceiling (15%–92% of population)
+  people_vaccinated = people_fully_vaccinated * 1.15 (≥1 dose always slightly more)
+  total_vaccinations = people_vaccinated * 1.6 (booster doses counted separately)
+
+MISSING VALUES:
+  ~0.5% null rate injected uniformly across: new_cases, new_deaths,
+  total_vaccinations, people_vaccinated.
+  This simulates real-world sporadic reporting failures.
+
+
+VISUALISATION CHOICES
+---------------------
+Chapter 3 — Global Impact:
+  - Area charts (Scatter with fill="tozeroy") for cumulative totals:
+    gives a sense of volume and emphasises the gap between cases and deaths.
+  - Bar + line overlay for daily new cases: bars show raw volatility,
+    7-day rolling average cuts through noise.
+  - Vertical lines at wave peaks: anchors the viewer to real events.
+  - Stacked area by continent: reveals geographic shift across waves.
+
+Chapter 4 — Country Comparison:
+  - Horizontal bar charts for rankings: easier label reading, natural sort.
+  - Colour scale mapped to value (not category): communicates gradient.
+  - Scatter plot for vaccination vs CFR: correlation visualisation.
+  - Time series multiselect: allows personalised exploration.
+
+Chapter 5 — Visual Storytelling:
+  - Animated bar chart race (px.bar with animation_frame): shows temporal change.
+  - Choropleth with geo styling: global view, togglable metric.
+  - Heatmap (go.Heatmap): log-scale intensity, best for visualising sparse spikes.
+  - Animated scatter (px.scatter): cases vs deaths evolution, bubble = scale.
+  - Horizontal bar for vaccination milestones: timeline race feel.
+
+Chapter 6 — Key Findings:
+  - Rolling CFR chart: shows the most important trend in the dataset.
+  - Normalised comparison chart: reveals Omicron decoupling unambiguously.
+  - Scatter with OLS trendline: shows vaccination-mortality relationship.
+  - Finding cards: consistent visual language for all 7 insights.
+
+Chapter 7 — Recommendations:
+  - Numbered recommendation cards with colour-coded left borders.
+  - Radar chart (Scatterpolar): ideal vs current preparedness comparison.
+  - Summary metric row: closing numerical anchor.
+
+
+STYLING SYSTEM
+--------------
+All styles are injected via a single GLOBAL_CSS string in app.py using
+st.markdown(..., unsafe_allow_html=True).
+
+Design system:
+  Background:   #0a0e1a (deep navy, near-black)
+  Card bg:      #1a2235
+  Accent red:   #e63946 (deaths, alerts, danger)
+  Accent amber: #f4a261 (cases, warnings, stats)
+  Accent teal:  #2a9d8f (recoveries, positive trends)
+  Accent blue:  #457b9d (active cases, neutral data)
+  Text primary: #f1f5f9
+  Text muted:   #94a3b8
+
+Typography:
+  Display/headings: Playfair Display (serif, editorial authority)
+  Body copy:        Source Sans 3 (clean, readable at small sizes)
+  Data labels:      JetBrains Mono (monospaced, code aesthetic)
+
+Reusable CSS classes:
+  .hero-title       Large display heading
+  .hero-subtitle    Italic serif subtitle
+  .section-tag      Monospaced chapter/section label
+  .section-title    Section heading
+  .narrative-text   Body paragraph with comfortable line-height
+  .insight-box      Red-left-bordered callout for key findings
+  .stat-card        Dark card with amber stat value
+  .timeline-item    Dot + text timeline entry
+  .chapter-divider  Horizontal rule with centred label
+
+
+PLOTLY THEME
+------------
+Each chapter defines a local LAYOUT dict that overrides Plotly defaults:
+  paper_bgcolor: "#0a0e1a"
+  plot_bgcolor:  "#111827"
+  font:          Source Sans 3, #f1f5f9
+  gridcolor:     rgba(255,255,255,0.04)  (very subtle)
+  hovermode:     "x unified" or "closest" depending on chart type
+
+All charts are rendered with st.plotly_chart(..., use_container_width=True).
+
+
+DEPLOYMENT
+----------
+Local:
+  streamlit run app.py
+
+Streamlit Community Cloud (free):
+  1. Push to GitHub (public or private)
+  2. Go to share.streamlit.io
+  3. Connect repo, set main file to app.py
+  4. Add a startup command or pre-run script:
+       In .streamlit/config.toml or a shell wrapper, run generate_dataset.py first.
+  Note: If you commit data/covid19_global_data.csv to the repo, no pre-run is needed.
+
+Docker:
+  FROM python:3.11-slim
+  WORKDIR /app
+  COPY . .
+  RUN pip install -r requirements.txt
+  RUN python generate_dataset.py
+  EXPOSE 8501
+  CMD ["streamlit", "run", "app.py", "--server.port=8501"]
+
+Heroku / Render:
+  Use a Procfile:
+    web: python generate_dataset.py && streamlit run app.py --server.port=$PORT
+
+
+PERFORMANCE NOTES
+-----------------
+- @st.cache_data in app.py ensures the CSV is read and processed only once per session.
+- Each chapter does its own aggregations (groupby, pivot) on the cached df.
+  These are fast (<100ms) for 29,000 rows.
+- Animated Plotly charts (bar race, scatter race) generate frames for each month.
+  ~48 months × 10–20 countries = ~500–960 data points. Renders in <2s.
+- The heatmap pivot table (~20 countries × 48 months) is instantaneous.
+- For production with >1M rows, consider pre-computing aggregations to Parquet files.
+
+
+TESTING
+-------
+No formal test suite is included. Recommended checks:
+1. Run generate_dataset.py and confirm CSV row count ~29,220
+2. Run streamlit run app.py and navigate every chapter
+3. Verify no NaN errors in metrics (check for division-by-zero guards with replace(0, np.nan))
+4. Test multiselect in Chapter 4 with all 20 countries selected
+5. Test choropleth with each of the 4 metric options
+6. Confirm animated charts play correctly in Chrome and Firefox
+
+
+EXTENDING THE APP
+-----------------
+To add a new chapter:
+  1. Create pages/my_chapter.py with def render(df): ...
+  2. Import in pages/__init__.py
+  3. Add to CHAPTERS dict in app.py
+  4. Add to CHAPTER_MAP dict in app.py
+
+To use real OWID data instead of simulated data:
+  Replace generate_dataset.py with a downloader:
+    url = "https://covid.ourworldindata.org/data/owid-covid-data.csv"
+    df = pd.read_csv(url)
+  Then map OWID column names to the column names used in this app.
+  Key mappings:
+    OWID: new_cases_smoothed       → this app: new_cases
+    OWID: new_deaths_smoothed      → this app: new_deaths
+    OWID: people_fully_vaccinated  → this app: people_fully_vaccinated  (same)
+    OWID: iso_code                 → this app: iso_code  (same)
+
+
+KNOWN LIMITATIONS
+-----------------
+1. The dataset is simulated. Absolute numbers do not match real-world figures.
+2. Africa's under-reporting is modelled (low base infection rate parameter)
+   but is presented as a data quality insight, not a simulation error.
+3. Animated charts require a modern browser. IE11 / old Safari may not render.
+4. The choropleth only shows 20 countries; the map will show most of the world
+   as blank (no data). This is expected.
+5. The OLS trendline in the vaccination-mortality scatter requires scipy.
+   If scipy is not installed, replace trendline="ols" with None.
+
+
+AUTHOR NOTES
+------------
+This application was designed as a storytelling exercise first, technical
+demonstration second. Every design decision — dark theme, serif headings,
+insight boxes, wave annotations — was made to serve the narrative.
+
+The goal is not to prove that you can make charts. It is to prove that data,
+presented with intention, can change how people understand the world.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
